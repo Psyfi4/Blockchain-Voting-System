@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.db
+*.onnx
+*.pth
+*.dat
+.cache/
+models/
