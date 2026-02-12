@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-AadhaarFaceSystem – FINAL Pylance-Clean Version
-- InsightFace only
-- NumPy 1.26 compatible
-- Headless / Codespaces safe
-- ZERO invalid type expressions
+AadhaarFaceSystem – Stable Recognition Version
 """
 
 from typing import List, Dict, Optional, Any
@@ -12,59 +8,35 @@ from datetime import datetime
 import os
 import sqlite3
 import time
+import numpy as np
+from PIL import Image
+from insightface.app import FaceAnalysis
 
-# ---------------- DEPENDENCY CHECKS ---------------- #
-
-_missing = []
-
-try:
-    import numpy as np
-except Exception:
-    np = None
-    _missing.append("numpy==1.26.4")
-
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-    _missing.append("Pillow")
-
-try:
-    from insightface.app import FaceAnalysis
-except Exception:
-    FaceAnalysis = None
-    _missing.append("insightface + onnxruntime")
-
-if _missing:
-    raise RuntimeError(
-        "Missing dependencies:\n"
-        + ", ".join(_missing)
-        + "\n\nInstall with:\n"
-        "pip install numpy==1.26.4 pillow insightface onnxruntime"
-    )
-
-# ---------------- SYSTEM CLASS ---------------- #
 
 class AadhaarFaceSystem:
+
     def __init__(self, db_path: str = "aadhaar_face_db.db"):
         self.db_path = db_path
+
         os.makedirs("static/registered_faces", exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._create_tables()
 
+        # CPU mode (Codespaces safe)
         self.face_app = FaceAnalysis(name="buffalo_l")
         self.face_app.prepare(ctx_id=-1, det_size=(640, 640))
 
-        self.known_embeddings: List[Any] = []
+        self.known_embeddings: List[np.ndarray] = []
         self.known_details: List[Dict[str, str]] = []
 
         self._load_cache()
 
     # ---------------- DATABASE ---------------- #
 
-    def _create_tables(self) -> None:
+    def _create_tables(self):
         cur = self.conn.cursor()
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS persons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +50,7 @@ class AadhaarFaceSystem:
                 registration_date TEXT
             )
         """)
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS recognition_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,10 +59,11 @@ class AadhaarFaceSystem:
                 confidence REAL
             )
         """)
+
         self.conn.commit()
         cur.close()
 
-    def _load_cache(self) -> None:
+    def _load_cache(self):
         cur = self.conn.cursor()
         cur.execute("SELECT aadhaar_number, name, embedding FROM persons")
         rows = cur.fetchall()
@@ -106,6 +80,8 @@ class AadhaarFaceSystem:
                         "aadhaar_number": aadhaar,
                         "name": name
                     })
+
+        print("Loaded embeddings:", len(self.known_embeddings))
         cur.close()
 
     # ---------------- REGISTRATION ---------------- #
@@ -114,24 +90,27 @@ class AadhaarFaceSystem:
         self,
         face_image: Any,
         person_data: Dict[str, Optional[str]]
-    ) -> tuple[bool, str]:
+    ):
 
         if not hasattr(face_image, "convert"):
-            return False, "Invalid image object (expected PIL Image)"
+            return False, "Invalid image"
 
         frame = np.array(face_image.convert("RGB"))
         faces = self.face_app.get(frame)
 
         if not faces:
             return False, "No face detected"
+
         if len(faces) > 1:
             return False, "Multiple faces detected"
 
         face = faces[0]
         emb = face.embedding.astype(np.float32)
+
         if emb.size != 512:
             return False, "Invalid embedding size"
 
+        # Save crop
         ts = int(time.time())
         x1, y1, x2, y2 = map(int, face.bbox)
         crop = frame[y1:y2, x1:x2]
@@ -155,59 +134,71 @@ class AadhaarFaceSystem:
             save_path,
             datetime.utcnow().isoformat()
         ))
+
         self.conn.commit()
         cur.close()
 
         self._load_cache()
+
         return True, "Person registered successfully"
 
     # ---------------- RECOGNITION ---------------- #
 
-    def recognize_face_from_pil(self, face_image: Any) -> List[Dict[str, Any]]:
+    def recognize_face_from_pil(self, face_image):
+
         if not hasattr(face_image, "convert"):
             return []
 
         frame = np.array(face_image.convert("RGB"))
         faces = self.face_app.get(frame)
 
-        results: List[Dict[str, Any]] = []
+        results = []
 
         for f in faces:
+
             emb = f.embedding.astype(np.float32)
-            emb /= (np.linalg.norm(emb) + 1e-10)
+
+            if emb.size != 512:
+                continue
 
             best_idx = None
-            best_conf = 0.0
+            best_sim = -1.0
 
             for i, known in enumerate(self.known_embeddings):
-                known_n = known / (np.linalg.norm(known) + 1e-10)
-                sim = float(np.dot(emb, known_n))
-                conf = (sim + 1.0) / 2.0
-                if conf > best_conf:
-                    best_conf = conf
+
+                sim = float(
+                    np.dot(emb, known) /
+                    ((np.linalg.norm(emb) * np.linalg.norm(known)) + 1e-10)
+                )
+
+                if sim > best_sim:
+                    best_sim = sim
                     best_idx = i
 
-            matched = best_conf >= 0.44
-            aadhaar = name = None
+            confidence = (best_sim + 1.0) / 2.0
+            matched = best_sim > 0.40  # 🔥 tuned for webcam
+
+            name = None
+            aadhaar = None
 
             if matched and best_idx is not None:
                 detail = self.known_details[best_idx]
-                aadhaar = detail["aadhaar_number"]
                 name = detail["name"]
-                self._log_recognition(aadhaar, best_conf)
+                aadhaar = detail["aadhaar_number"]
+                self._log_recognition(aadhaar, confidence)
 
             results.append({
                 "name": name,
                 "aadhaar_number": aadhaar,
-                "confidence": best_conf,
+                "confidence": confidence,
                 "matched": matched
             })
 
         return results
 
-    # ---------------- UTILITIES ---------------- #
+    # ---------------- LOGGING ---------------- #
 
-    def _log_recognition(self, aadhaar: str, confidence: float) -> None:
+    def _log_recognition(self, aadhaar, confidence):
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO recognition_logs (aadhaar_number, time, confidence) VALUES (?, ?, ?)",
@@ -216,5 +207,5 @@ class AadhaarFaceSystem:
         self.conn.commit()
         cur.close()
 
-    def close(self) -> None:
+    def close(self):
         self.conn.close()
