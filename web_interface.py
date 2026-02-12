@@ -38,7 +38,7 @@ os.makedirs(os.path.join("static", "registered_faces"), exist_ok=True)
 os.makedirs(os.path.join("static", "aadhaar_photos"), exist_ok=True)
 
 # single global instance
-system = AadhaarFaceSystem(debug=True)
+system = AadhaarFaceSystem()
 
 # Regex to match data URLs
 _DATAURL_RE = re.compile(r'data:(image/[^;]+);base64,(.*)$', re.I)
@@ -184,7 +184,7 @@ def detect_preview():
     # convert RGB->BGR for insightface/opencv
     bgr = rgb[:, :, ::-1].copy()
     try:
-        faces = system.app.get(bgr)
+        faces = system.face_app.get(bgr)
     except Exception as e:
         print("[detect_preview] insightface get failed:", e)
         return jsonify({"faces": [], "error": str(e)}), 500
@@ -250,13 +250,19 @@ def register_api():
 
     # call register_person to store embedding/etc.
     try:
-        ok, msg = system.register_person(tmp_path, {
+
+        pil_img = Image.open(tmp_path)
+        ok, msg = system.register_person_from_pil(
+        pil_img,
+        {
             "aadhaar_number": aadhaar_number,
             "name": name,
             "date_of_birth": dob,
             "gender": gender,
             "address": address,
-        })
+        }
+    )
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "message": "register_person raised exception: " + str(e)}), 500
@@ -401,7 +407,7 @@ def recognize_stream():
 
     bgr = rgb[:, :, ::-1].copy()
     try:
-        results = system.recognize_face(rgb)
+        results = system.recognize_face_from_pil(Image.fromarray(rgb))
     except Exception:
         try:
             results = system.recognize_face(bgr)
