@@ -54,7 +54,7 @@ class AadhaarFaceSystem:
         self._create_tables()
 
         self.face_app = FaceAnalysis(name="buffalo_l")
-        self.face_app.prepare(ctx_id=0, det_size=(640, 640))
+        self.face_app.prepare(ctx_id=-1, det_size=(640, 640))
 
         self.known_embeddings: List[Any] = []
         self.known_details: List[Dict[str, str]] = []
