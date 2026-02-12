@@ -1,8 +1,26 @@
+import os
+import sys
+from importlib.machinery import PathFinder
+from importlib.util import module_from_spec
+
 import cv2
-import face_recognition
 import sqlite3
 from datetime import datetime
 from typing import Any, Callable, Dict, List
+
+
+def _load_face_recognition_pkg():
+    local_dir = os.path.abspath(os.path.dirname(__file__))
+    search_paths = [p for p in sys.path if p and os.path.abspath(p) != local_dir]
+    spec = PathFinder.find_spec("face_recognition", search_paths)
+    if spec is None or spec.loader is None:
+        raise ImportError("Third-party face_recognition package not found")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+face_recognition = _load_face_recognition_pkg()
 
 
 def recognize_face(

@@ -1,13 +1,29 @@
 import os
 import re
 import sqlite3
+import sys
 from datetime import datetime
+from importlib.machinery import PathFinder
+from importlib.util import module_from_spec
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import easyocr
-import face_recognition
 import numpy as np
+
+
+def _load_face_recognition_pkg():
+    local_dir = os.path.abspath(os.path.dirname(__file__))
+    search_paths = [p for p in sys.path if p and os.path.abspath(p) != local_dir]
+    spec = PathFinder.find_spec("face_recognition", search_paths)
+    if spec is None or spec.loader is None:
+        raise ImportError("Third-party face_recognition package not found")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+face_recognition = _load_face_recognition_pkg()
 
 DB_PATH = "db/aadhaar.db"
 _AADHAAR_RE = re.compile(r"\b\d{12}\b")
@@ -133,27 +149,24 @@ class AadhaarFaceSystem:
 
     def _upsert_person(self, payload: Dict[str, Any]) -> None:
         cur = self.conn.cursor()
+        aadhaar_number = payload.get("aadhaar_number")
+
         cur.execute(
             """
-            INSERT INTO persons (
-                aadhaar_number, name, date_of_birth, gender, address,
-                face_encoding, face_path, aadhaar_path,
-                registered_face_path, aadhaar_photo_path, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(aadhaar_number) DO UPDATE SET
-                name=excluded.name,
-                date_of_birth=excluded.date_of_birth,
-                gender=excluded.gender,
-                address=excluded.address,
-                face_encoding=excluded.face_encoding,
-                face_path=excluded.face_path,
-                aadhaar_path=excluded.aadhaar_path,
-                registered_face_path=excluded.registered_face_path,
-                aadhaar_photo_path=excluded.aadhaar_photo_path,
-                created_at=excluded.created_at
+            UPDATE persons
+            SET name = ?,
+                date_of_birth = ?,
+                gender = ?,
+                address = ?,
+                face_encoding = ?,
+                face_path = ?,
+                aadhaar_path = ?,
+                registered_face_path = ?,
+                aadhaar_photo_path = ?,
+                created_at = ?
+            WHERE aadhaar_number = ?
             """,
             (
-                payload.get("aadhaar_number"),
                 payload.get("name"),
                 payload.get("date_of_birth"),
                 payload.get("gender"),
@@ -164,8 +177,34 @@ class AadhaarFaceSystem:
                 payload.get("registered_face_path"),
                 payload.get("aadhaar_photo_path"),
                 payload.get("created_at"),
+                aadhaar_number,
             ),
         )
+
+        if cur.rowcount == 0:
+            cur.execute(
+                """
+                INSERT INTO persons (
+                    aadhaar_number, name, date_of_birth, gender, address,
+                    face_encoding, face_path, aadhaar_path,
+                    registered_face_path, aadhaar_photo_path, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    aadhaar_number,
+                    payload.get("name"),
+                    payload.get("date_of_birth"),
+                    payload.get("gender"),
+                    payload.get("address"),
+                    payload.get("face_encoding"),
+                    payload.get("face_path"),
+                    payload.get("aadhaar_path"),
+                    payload.get("registered_face_path"),
+                    payload.get("aadhaar_photo_path"),
+                    payload.get("created_at"),
+                ),
+            )
+
         self.conn.commit()
 
     # ---------- REGISTRATION ---------- #
