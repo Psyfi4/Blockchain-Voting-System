@@ -1,0 +1,261 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Live Recognition</title>
+  <style>
+    :root { --video-w: 640px; --video-h: 480px; }
+    body{font-family:system-ui, -apple-system,Segoe UI,Roboto,Arial;margin:12px;color:#ddd;background:#111;}
+    .wrap{display:flex;gap:16px;align-items:flex-start;}
+    .panel{background:#1b1b1b;padding:12px;border-radius:8px;border:1px solid #222;color:#ddd;}
+    .video-wrap{position:relative;width:var(--video-w);height:var(--video-h);background:#000;border-radius:6px;overflow:hidden;}
+    video{position:absolute; left:0; top:0; width:100%; height:100%; object-fit:cover; transform: none; display:block;}
+    canvas#overlay{position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;}
+    .controls{margin-top:8px; display:flex; gap:8px;}
+    .info{width:360px;}
+    .match-card{border:1px solid #333;padding:8px;border-radius:6px;margin-bottom:8px;background:#131313;}
+    .muted{color:#999;font-size:13px;}
+    #netstatus {font-size:13px;color:#9a9;}
+    .hint {color:#bbb;font-size:13px;margin-top:8px;}
+    .match-images { display:flex; gap:8px; margin-top:8px; align-items:flex-start; }
+    .match-images img { max-width: 160px; max-height: 120px; border-radius:6px; border:1px solid #222; background:#000; display:block; }
+    .match-meta { margin-top:6px; font-size:14px; color:#ddd; }
+    .no-wrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display:block; }
+  </style>
+</head>
+<body>
+  <h2 style="color:#fff">Live Face Recognition</h2>
+  <div class="wrap">
+    <div class="panel">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <div class="controls">
+        <button id="startBtn">Start Camera</button>
+        <button id="stopBtn">Stop</button>
+        <div id="netstatus">Idle</div>
+      </div>
+
+      <div class="muted hint">Face dims: <span id="dims">-</span></div>
+      <div class="muted hint">Tip: run this page in a browser on the same machine as your webcam (localhost).</div>
+    </div>
+
+    <div class="panel info">
+      <h3>Match / Details</h3>
+      <div id="matches">No match yet.</div>
+    </div>
+  </div>
+
+<script>
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
+const netstatus = document.getElementById("netstatus");
+let stream = null;
+let running = false;
+let tickHandle = null;
+let lastBox = null;
+const SERVER_FPS_MS = 600;
+
+function setCanvasForVideo(){
+  const dpr = window.devicePixelRatio || 1;
+  const w = video.videoWidth || 640;
+  const h = video.videoHeight || 480;
+  overlay.width = Math.max(1, Math.round(w * dpr));
+  overlay.height = Math.max(1, Math.round(h * dpr));
+  overlay.style.width = (w) + "px";
+  overlay.style.height = (h) + "px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+video.addEventListener('loadedmetadata', () => {
+  setCanvasForVideo();
+});
+
+async function startCamera(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    setCanvasForVideo();
+    running = true;
+    runLoop();
+    netstatus.innerText = "Camera running";
+  }catch(e){
+    console.error("Camera start error:", e);
+    netstatus.innerText = "Camera error";
+    alert("Camera error: " + (e && e.message ? e.message : e) + ". If running remotely, open page locally.");
+  }
+}
+
+function stopCamera(){
+  running = false;
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream = null;
+  }
+  if(tickHandle) { clearTimeout(tickHandle); tickHandle = null; }
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  document.getElementById("matches").innerText = "No match yet.";
+  document.getElementById("dims").innerText = "-";
+  netstatus.innerText = "Stopped";
+  lastBox = null;
+}
+
+function captureFrameDataUrl(){
+  const c = document.createElement("canvas");
+  const w = video.videoWidth || 640;
+  const h = video.videoHeight || 480;
+  c.width = w; c.height = h;
+  const cx = c.getContext("2d");
+  cx.drawImage(video, 0, 0, w, h);
+  return c.toDataURL("image/jpeg", 0.7);
+}
+
+function smoothBox(x1,y1,x2,y2,alpha=0.6){
+  if(!lastBox) { lastBox = [x1,y1,x2,y2]; return [x1,y1,x2,y2]; }
+  lastBox = [
+    lastBox[0]*(1-alpha) + x1*alpha,
+    lastBox[1]*(1-alpha) + y1*alpha,
+    lastBox[2]*(1-alpha) + x2*alpha,
+    lastBox[3]*(1-alpha) + y2*alpha,
+  ];
+  return lastBox.map(v=>Math.round(v));
+}
+
+async function runLoop(){
+  if(!running) return;
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+
+  // draw guide rectangle
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,0.12)";
+  ctx.lineWidth = 1;
+  const pad = 20;
+  // calculate numeric width/height from style values
+  const w = parseInt(overlay.style.width || "640", 10) || 640;
+  const h = parseInt(overlay.style.height || "480", 10) || 480;
+  ctx.strokeRect(pad, pad, Math.max(10, w - 2*pad), Math.max(10, h - 2*pad));
+  ctx.restore();
+
+  const snap = captureFrameDataUrl();
+  netstatus.innerText = "Sending frame...";
+  try{
+    const resp = await fetch("/recognize_frame", {
+      method:"POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ image: snap })
+    });
+    netstatus.innerText = "Server: " + resp.status;
+    if(!resp.ok){
+      const body = await resp.text();
+      console.warn("recognize_frame failed:", resp.status, body);
+    } else {
+      const json = await resp.json();
+      if(json.results && json.results.length){
+        const r = json.results[0];
+        let left, top, right, bottom;
+        if(r.location_norm && r.location_norm.length === 4){
+          const [nx1, ny1, nx2, ny2] = r.location_norm;
+          const vw = video.videoWidth || 640;
+          const vh = video.videoHeight || 480;
+          left = Math.round(nx1 * vw);
+          top = Math.round(ny1 * vh);
+          right = Math.round(nx2 * vw);
+          bottom = Math.round(ny2 * vh);
+        } else if(r.location_px && r.location_px.length === 4){
+          [left, top, right, bottom] = r.location_px;
+        } else if(r.location && r.location.length === 4){
+          const [t, rgt, b, l] = r.location;
+          left = l; top = t; right = rgt; bottom = b;
+        } else {
+          left = top = right = bottom = 0;
+        }
+
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 480;
+        left = Math.max(0, Math.min(vw, left));
+        top = Math.max(0, Math.min(vh, top));
+        right = Math.max(0, Math.min(vw, right));
+        bottom = Math.max(0, Math.min(vh, bottom));
+
+        [left, top, right, bottom] = smoothBox(left, top, right, bottom, 0.6);
+
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = r.matched ? "lime" : (r.unconfirmed ? "orange" : "red");
+        ctx.strokeRect(left, top, Math.max(2, right-left), Math.max(2, bottom-top));
+
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(left, Math.max(0, top-22), 120, 20);
+        ctx.fillStyle = "white";
+        ctx.font = "14px sans-serif";
+        ctx.fillText(`${Math.max(0,right-left)} x ${Math.max(0,bottom-top)}`, left+4, Math.max(12, top-8));
+
+        document.getElementById("dims").innerText = `${Math.max(0,right-left)} x ${Math.max(0,bottom-top)}`;
+
+        // update details panel (show both registered face + aadhaar photo if available)
+        const matches = document.getElementById("matches");
+        matches.innerHTML = "";
+        const card = document.createElement("div");
+        card.className = "match-card";
+        const name = r.name || "(unknown)";
+        const a = r.aadhaar_number || "(none)";
+        card.innerHTML = `<strong class="no-wrap">${name}</strong><div class="match-meta">Aadhaar: ${a}</div><div class="match-meta">Confidence: ${(r.confidence||0).toFixed(3)}</div>`;
+        if(r.details){
+          const d = r.details;
+          const details_html = `<div style="margin-top:6px;"><b>Details</b>
+            <div>Name: ${d.name || "-"}</div>
+            <div>DOB: ${d.date_of_birth || "-"}</div>
+            <div>Address: ${d.address || "-"}</div>
+            <div>Registered: ${d.registration_date || "-"}</div>
+          </div>`;
+          card.innerHTML += details_html;
+        }
+
+        // images container: preferred order -> registered_face, aadhaar_photo
+        const imagesDiv = document.createElement("div");
+        imagesDiv.className = "match-images";
+
+        if(r.registered_face){
+          try {
+            const imgReg = document.createElement("img");
+            imgReg.src = r.registered_face;
+            imgReg.alt = "Registered face";
+            imagesDiv.appendChild(imgReg);
+          } catch(e){ console.warn("registered_face render failed", e); }
+        }
+
+        if(r.aadhaar_photo){
+          try {
+            const imgAad = document.createElement("img");
+            imgAad.src = r.aadhaar_photo;
+            imgAad.alt = "Aadhaar card";
+            imagesDiv.appendChild(imgAad);
+          } catch(e){ console.warn("aadhaar_photo render failed", e); }
+        }
+
+        if(imagesDiv.childElementCount > 0){
+          card.appendChild(imagesDiv);
+        }
+
+        matches.appendChild(card);
+      } else {
+        document.getElementById("dims").innerText = "-";
+        document.getElementById("matches").innerText = "No match yet.";
+      }
+    }
+  }catch(err){
+    console.error("recognize_frame error:", err);
+    netstatus.innerText = "Error";
+  }
+
+  tickHandle = setTimeout(runLoop, SERVER_FPS_MS);
+}
+
+document.getElementById("startBtn").addEventListener("click", startCamera);
+document.getElementById("stopBtn").addEventListener("click", stopCamera);
+</script>
+</body>
+</html>

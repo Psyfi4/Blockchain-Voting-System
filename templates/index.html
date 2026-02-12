@@ -1,0 +1,234 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Aadhaar Face — Registration & Recognition</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .container { display:flex; gap:16px; }
+    .panel { border:1px solid #ddd; padding:12px; border-radius:8px; width:48%; box-sizing:border-box; }
+    video { width:100%; max-height:360px; background:#000; }
+    img.preview { width:100%; max-height:200px; object-fit:contain; border:1px solid #ccc; }
+    .info { margin-top:8px; }
+    .face-box { position:relative; }
+    #recognized-list { margin-top:8px; }
+    .field { margin:6px 0; }
+    button { padding:8px 12px; }
+    .small { font-size:0.9rem; color:#666; }
+  </style>
+</head>
+<body>
+  <h2>Aadhaar Face — Registration & Recognition</h2>
+  <div class="container">
+    <!-- Registration panel -->
+    <div class="panel" id="registration">
+      <h3>Registration (capture face + upload Aadhaar)</h3>
+      <div class="face-box">
+        <video id="reg-video" autoplay muted playsinline></video>
+      </div>
+      <div class="info small">
+        Camera status: <span id="reg-camera-status">starting...</span>
+      </div>
+
+      <div style="margin-top:8px;">
+        <button id="capture-reg">Capture Face for Registration</button>
+        <input type="file" id="aadhaar-file" accept="image/*">
+      </div>
+
+      <div class="field">
+        <label>Name override: <input id="name-override" placeholder="optional"></label>
+      </div>
+
+      <div style="margin-top:8px;">
+        <img id="reg-preview" class="preview" alt="captured face preview">
+      </div>
+
+      <div style="margin-top:8px;">
+        <button id="send-register">Send Registration</button>
+      </div>
+
+      <div id="reg-result" class="info"></div>
+    </div>
+
+    <!-- Recognition panel -->
+    <div class="panel" id="recognition">
+      <h3>Recognition (live)</h3>
+      <video id="rec-video" autoplay muted playsinline></video>
+
+      <div class="info small">
+        Camera status: <span id="rec-camera-status">starting...</span>
+      </div>
+
+      <div style="margin-top:8px;">
+        <button id="start-recognize">Start Recognition</button>
+        <button id="stop-recognize" disabled>Stop</button>
+      </div>
+
+      <div id="recognized-list"></div>
+    </div>
+  </div>
+
+<script>
+const regVideo = document.getElementById('reg-video');
+const recVideo = document.getElementById('rec-video');
+const regStatus = document.getElementById('reg-camera-status');
+const recStatus = document.getElementById('rec-camera-status');
+const regPreview = document.getElementById('reg-preview');
+const captureBtn = document.getElementById('capture-reg');
+const sendRegBtn = document.getElementById('send-register');
+const aadhaarInput = document.getElementById('aadhaar-file');
+const nameOverride = document.getElementById('name-override');
+const startRecBtn = document.getElementById('start-recognize');
+const stopRecBtn = document.getElementById('stop-recognize');
+const recognizedList = document.getElementById('recognized-list');
+
+let localStream = null;
+let recInterval = null;
+
+// start a single camera stream and attach to both preview videos
+async function startCamera() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    // attach stream to both videos
+    regVideo.srcObject = localStream;
+    recVideo.srcObject = localStream;
+    regStatus.textContent = "Camera active";
+    recStatus.textContent = "Camera active";
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    regStatus.textContent = "Camera error: " + msg;
+    recStatus.textContent = "Camera error: " + msg;
+    console.error("getUserMedia error:", err);
+  }
+}
+
+// stop camera
+function stopCamera() {
+  if (localStream) {
+    localStream.getTracks().forEach(t=>t.stop());
+    localStream = null;
+    regStatus.textContent = "stopped";
+    recStatus.textContent = "stopped";
+  }
+}
+
+// helper: capture frame from video as dataURL
+function captureFromVideo(videoEl) {
+  const w = videoEl.videoWidth || 640;
+  const h = videoEl.videoHeight || 480;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+
+// registration capture
+captureBtn.addEventListener('click', () => {
+  if (!localStream) { alert("Camera not started or available."); return; }
+  const dataUrl = captureFromVideo(regVideo);
+  regPreview.src = dataUrl;
+});
+
+// send registration to server
+sendRegBtn.addEventListener('click', async () => {
+  if (!regPreview.src) { alert("No captured face preview — capture first."); return; }
+  if (!aadhaarInput.files || aadhaarInput.files.length === 0) { alert("Upload Aadhaar image."); return; }
+
+  // convert dataURL to blob
+  function dataURLToBlob(dataURL) {
+    const parts = dataURL.split(',');
+    const mime = parts[0].match(/:(.*?);/)[1];
+    const bstr = atob(parts[1]);
+    let n = bstr.length;
+    const u8 = new Uint8Array(n);
+    while (n--) u8[n] = bstr.charCodeAt(n);
+    return new Blob([u8], {type: mime});
+  }
+  const faceBlob = dataURLToBlob(regPreview.src);
+
+  const form = new FormData();
+  form.append('face_blob', faceBlob, 'face.jpg');
+  form.append('aadhaar_file', aadhaarInput.files[0]);
+  form.append('name_override', nameOverride.value || '');
+
+  const res = await fetch('/register_confirm', { method: 'POST', body: form });
+  const j = await res.json();
+  document.getElementById('reg-result').textContent = JSON.stringify(j, null, 2);
+});
+
+// recognition loop (send snapshot to /recognize)
+async function startRecognitionLoop() {
+  if (!localStream) { alert("Camera not available."); return; }
+  startRecBtn.disabled = true;
+  stopRecBtn.disabled = false;
+  recognizedList.innerHTML = '';
+  recInterval = setInterval(async () => {
+    try {
+      const dataUrl = captureFromVideo(recVideo);
+      const resp = await fetch('/recognize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: dataUrl })
+      });
+      const j = await resp.json();
+      if (j.error) {
+        console.warn("recognize error", j);
+      }
+      renderRecognition(j.faces || []);
+    } catch (e) {
+      console.error("recognition loop error:", e);
+    }
+  }, 900); // ~1 request/sec (adjust)
+}
+
+function stopRecognitionLoop() {
+  startRecBtn.disabled = false;
+  stopRecBtn.disabled = true;
+  if (recInterval) clearInterval(recInterval);
+  recInterval = null;
+}
+
+function renderRecognition(faces) {
+  recognizedList.innerHTML = '';
+  if (!faces.length) {
+    recognizedList.textContent = "No faces recognized.";
+    return;
+  }
+  faces.forEach(f => {
+    const div = document.createElement('div');
+    div.style.border = '1px solid #ddd';
+    div.style.padding = '8px';
+    div.style.marginTop = '8px';
+    const title = document.createElement('div');
+    title.innerHTML = `<strong>${f.name || 'Unknown'}</strong> — confidence ${Number(f.confidence).toFixed(3)}`;
+    div.appendChild(title);
+
+    if (f.details) {
+      const d = document.createElement('div');
+      d.innerHTML = `<div>Aadhaar: ${f.details.aadhaar_number || 'N/A'}</div>
+                     <div>Name: ${f.details.name || 'N/A'}</div>
+                     <div>DOB: ${f.details.date_of_birth || 'N/A'}</div>
+                     <div>Address: ${f.details.address || 'N/A'}</div>
+                     <div>Registration: ${f.details.registration_date || 'N/A'}</div>`;
+      div.appendChild(d);
+    }
+    recognizedList.appendChild(div);
+  });
+}
+
+// start camera on load
+startCamera().catch(e => console.warn("startCamera failed:", e));
+
+// attach buttons
+startRecBtn.addEventListener('click', startRecognitionLoop);
+stopRecBtn.addEventListener('click', stopRecognitionLoop);
+
+// cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  stopRecognitionLoop();
+  stopCamera();
+});
+</script>
+</body>
+</html>

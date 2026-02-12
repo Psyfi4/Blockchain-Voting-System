@@ -1,0 +1,376 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Aadhaar Registration</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 12px; color: #ddd; background: #111; }
+    .container { display:flex; gap:20px; align-items:flex-start; }
+    .left { width: 680px; }
+    .right { width: 420px; }
+    .video-wrap { position: relative; width: 640px; height: 480px; background: #000; border-radius: 8px; overflow: hidden; }
+    video { display:block; width: 100%; height: auto; max-height: 480px; }
+    canvas.overlay { position:absolute; left:0; top:0; pointer-events:none; }
+    .controls { margin-top:8px; }
+    label { display:block; margin-top:10px; color:#ccc; font-size:14px; }
+    input, textarea { width:100%; padding:8px; background:#222; color:#eee; border:1px solid #333; border-radius:4px; box-sizing:border-box; }
+    button { margin-top:8px; padding:8px 12px; border-radius:6px; border:none; background:#0b79d0; color:#fff; cursor:pointer; }
+    .preview-face { margin-top:12px; border-radius:6px; overflow:hidden; width:320px; height:240px; background:#000; border:1px solid #444; display:flex; align-items:center; justify-content:center; }
+    .muted { color:#999; font-size:13px; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <h2>Aadhaar - Registration</h2>
+  <div class="container">
+    <div class="left">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay" class="overlay"></canvas>
+      </div>
+
+      <div class="controls">
+        <button id="startCamBtn">Start Camera</button>
+        <button id="captureBtn">Capture Face (for registration)</button>
+        <button id="stopCamBtn">Stop Camera</button>
+        <div class="muted">Face dims: <span id="faceDims">-</span></div>
+      </div>
+
+      <div class="preview-face" id="facePreview">
+        <div id="facePreviewMsg" style="color:#666">Preview captured face will appear here</div>
+        <img id="facePreviewImg" src="" alt="crop" style="max-width:100%; display:none;" />
+      </div>
+    </div>
+
+    <div class="right">
+      <label>Aadhaar number</label>
+      <input id="aadhaar_input" placeholder="111122223333" />
+
+      <label>Name</label>
+      <input id="name_input" placeholder="Full name" />
+
+      <label>Date of Birth</label>
+      <input id="dob_input" placeholder="DD/MM/YYYY" />
+
+      <label>Gender</label>
+      <input id="gender_input" placeholder="M/F" />
+
+      <label>Address</label>
+      <textarea id="address_input" rows="3" placeholder="Address"></textarea>
+
+      <label>Aadhaar card photo (upload)</label>
+      <input type="file" id="aadhaarPhotoInput" accept="image/*" />
+      <div class="muted">Recommended: upload a clear scan or mobile photo of the Aadhaar card front.</div>
+
+      <button id="submitRegistrationBtn">Submit Registration</button>
+      <div id="regStatus" class="muted"></div>
+    </div>
+  </div>
+
+<script>
+/* ======== helpers ======== */
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const videoWrap = document.getElementById('videoWrap');
+const faceDimsEl = document.getElementById('faceDims');
+const facePreviewImg = document.getElementById('facePreviewImg');
+const facePreviewMsg = document.getElementById('facePreviewMsg');
+let aadhaarPhotoDataUrl = null;
+let stream = null;
+let running = false;
+let detectInterval = null;
+let lastDetect = null; // store last server detection result
+
+// create or ensure overlay is positioned inside videoWrap and sized to match video
+function syncOverlayToVideo() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = video.videoWidth || video.clientWidth || 640;
+  const h = video.videoHeight || video.clientHeight || 480;
+  overlay.style.width = w + 'px';
+  overlay.style.height = h + 'px';
+  overlay.width = Math.max(1, Math.round(w * dpr));
+  overlay.height = Math.max(1, Math.round(h * dpr));
+  const ctx = overlay.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+// get a dataURL snapshot from video (JPEG)
+function getSnapshotDataUrl(quality=0.7) {
+  const c = document.createElement('canvas');
+  const w = video.videoWidth || video.clientWidth || 640;
+  const h = video.videoHeight || video.clientHeight || 480;
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', quality);
+}
+
+// draw bbox on overlay; expects pixel coords left,top,right,bottom
+function drawOverlayBox(box, color='lime') {
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0,0,overlay.width, overlay.height);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(box.left + 0.5, box.top + 0.5, (box.right - box.left), (box.bottom - box.top));
+  // dims label
+  ctx.font = "16px Arial";
+  ctx.fillStyle = color;
+  ctx.fillText(`${box.right - box.left} x ${box.bottom - box.top}`, box.left, Math.max(16, box.top - 6));
+}
+
+/* ======== camera control ======== */
+/* ===== Robust camera start / stop / overlay sync ===== */
+const camErrorEl = document.getElementById('regStatus') || document.createElement('div');
+
+async function startCamera() {
+  // Clear previous messages
+  if (camErrorEl) camErrorEl.innerText = '';
+
+  // Quick availability check
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const msg = 'Browser does not support getUserMedia.';
+    console.error(msg);
+    if (camErrorEl) camErrorEl.innerText = msg;
+    return;
+  }
+
+  // Try to get camera with several retries (handles intermittent permission/pop-up timing)
+  let attempts = 0;
+  const maxAttempts = 3;
+  let streamLocal = null;
+
+  while (attempts < maxAttempts && !streamLocal) {
+    attempts++;
+    try {
+      // prefer exact resolution but allow browser to pick best match
+      streamLocal = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+        audio: false
+      });
+    } catch (err) {
+      console.warn(`getUserMedia attempt ${attempts} failed:`, err);
+      // if permission denied, stop retrying
+      if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
+        const msg = 'Camera permission denied. Please allow camera in site settings.';
+        console.error(msg);
+        if (camErrorEl) camErrorEl.innerText = msg;
+        return;
+      }
+      // small delay before retry
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+
+  if (!streamLocal) {
+    const msg = 'Failed to obtain camera stream after multiple attempts.';
+    console.error(msg);
+    if (camErrorEl) camErrorEl.innerText = msg;
+    return;
+  }
+
+  // attach stream
+  stream = streamLocal;
+  video.srcObject = stream;
+
+  try {
+    // Some browsers require play() to be awaited
+    await video.play();
+  } catch (err) {
+    // If autoplay blocked, try muting and playing again (autoplay policy)
+    console.warn('video.play() failed, trying to mute then play:', err);
+    try {
+      video.muted = true;
+      await video.play();
+      // once playing, unmute if you need audio (we don't)
+    } catch (err2) {
+      console.error('video.play() still failed:', err2);
+      if (camErrorEl) camErrorEl.innerText = 'Unable to start video playback (autoplay blocked).';
+      return;
+    }
+  }
+
+  // now ensure overlay matches video dimensions
+  syncOverlayToVideo();
+  // update state & start detection loop
+  running = true;
+
+  // listen for metadata / resize
+  video.addEventListener('loadedmetadata', syncOverlayToVideo);
+  window.addEventListener('resize', syncOverlayToVideo);
+
+  // start detection loop (use your existing function)
+  startDetectionLoop();
+
+  console.log('Camera started successfully.');
+}
+
+function stopCamera() {
+  running = false;
+  // stop interval/detection
+  if (detectInterval) { clearInterval(detectInterval); detectInterval = null; }
+  // stop tracks
+  if (stream) {
+    try {
+      stream.getTracks().forEach(t => t.stop());
+    } catch (e) { console.warn('Error stopping tracks', e); }
+    stream = null;
+  }
+  // clear video src
+  try {
+    video.pause();
+    video.srcObject = null;
+  } catch (e) {}
+  // clear overlay
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  faceDimsEl.innerText = '-';
+  console.log('Camera stopped.');
+}
+
+/* ======== detection loop ======== */
+function startDetectionLoop() {
+  if (!running) return;
+  // call detect every 450-700ms (adjust as needed)
+  if (detectInterval) clearInterval(detectInterval);
+  detectInterval = setInterval(async () => {
+    try {
+      const dataUrl = getSnapshotDataUrl(0.6);
+      const resp = await fetch('/detect_preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ image: dataUrl })
+      });
+      const j = await resp.json();
+      lastDetect = j;
+      // server returns faces array with bbox x1,y1,x2,y2
+      if (j.faces && j.faces.length > 0) {
+        const f = j.faces[0];
+        const left = f.bbox[0], top = f.bbox[1], right = f.bbox[2], bottom = f.bbox[3];
+        drawOverlayBox({left, top, right, bottom}, 'lime');
+        faceDimsEl.innerText = `${f.w} x ${f.h}`;
+      } else {
+        // clear overlay
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0,0,overlay.width, overlay.height);
+        faceDimsEl.innerText = 'No face';
+      }
+    } catch (err) {
+      console.error('detect_preview error', err);
+    }
+  }, 600);
+}
+
+/* ======== capture & preview crop ======== */
+document.getElementById('captureBtn').addEventListener('click', async () => {
+  if (!running) { alert('Start camera first'); return; }
+  // take snapshot and crop using lastDetect bbox (server detection) if available
+  const snapData = getSnapshotDataUrl(0.9);
+  if (!lastDetect || !lastDetect.faces || lastDetect.faces.length === 0) {
+    alert('No face detected — move so the face is inside the guide and try again.');
+    return;
+  }
+  const f = lastDetect.faces[0];
+  const x1 = Math.max(0, f.bbox[0]), y1 = Math.max(0, f.bbox[1]);
+  const x2 = Math.min(video.videoWidth, f.bbox[2]), y2 = Math.min(video.videoHeight, f.bbox[3]);
+  // create canvas crop
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    const cw = x2 - x1, ch = y2 - y1;
+    c.width = cw; c.height = ch;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, x1, y1, cw, ch, 0, 0, cw, ch);
+    const dataURL = c.toDataURL('image/jpeg', 0.9);
+    facePreviewMsg.style.display = 'none';
+    facePreviewImg.style.display = 'block';
+    facePreviewImg.src = dataURL;
+    // store last captured dataurl to send on registration
+    facePreviewImg.dataset.captured = dataURL;
+  };
+  img.src = snapData;
+});
+
+/* ======== registration submit ======== */
+/* ======== registration submit (PATCHED) ======== */
+document.getElementById('submitRegistrationBtn').addEventListener('click', async () => {
+  const aadhaar = document.getElementById('aadhaar_input').value.trim();
+  const name = document.getElementById('name_input').value.trim();
+  const dob = document.getElementById('dob_input').value.trim();
+  const gender = document.getElementById('gender_input').value.trim();
+  const address = document.getElementById('address_input').value.trim();
+
+  if (!aadhaar || !name) { alert('Aadhaar number and Name are required'); return; }
+
+  // get the last-local crop preview (if any) and the full snapshot
+  const capturedCrop = facePreviewImg.dataset.captured || null;
+  // ALWAYS send the full frame for server registration/detection
+  const fullSnapshot = getSnapshotDataUrl(0.95);
+
+  if (!fullSnapshot) { alert('Could not capture camera frame.'); return; }
+
+  document.getElementById('regStatus').innerText = 'Registering...';
+
+  try {
+    const payload = {
+      // server expects "image" key in your /register_api currently; we send full frame there
+      image: fullSnapshot,
+      // include the crop as optional helper for server or UI (server can ignore)
+      image_crop: capturedCrop,
+      aadhaar_number: aadhaar,
+      name: name,
+      date_of_birth: dob,
+      gender: gender,
+      address: address,
+      aadhaar_photo: aadhaarPhotoDataUrl  // may be null if user didn't upload
+    };
+
+    const resp = await fetch('/register_api', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+
+    // read raw text, attempt to parse JSON for helpful debug messages
+    const text = await resp.text();
+    let j = null;
+    try { j = text ? JSON.parse(text) : null; } catch(e) {
+      // if JSON invalid, show raw response for debugging
+      console.warn('Non-JSON registration response:', text);
+    }
+
+    if (!resp.ok) {
+      const msg = (j && (j.message || j.error)) ? (j.message || j.error) : `HTTP ${resp.status} ${resp.statusText}`;
+      document.getElementById('regStatus').innerText = 'Registration failed: ' + msg;
+      console.error('register_api failed response:', j || text);
+      return;
+    }
+
+    // if server returned JSON success structure
+    if (j && j.success) {
+      document.getElementById('regStatus').innerText = 'Registration success: ' + (j.message || '');
+      // optionally clear preview/crops
+      facePreviewImg.dataset.captured = '';
+      facePreviewImg.style.display = 'none';
+      facePreviewMsg.style.display = 'block';
+    } else {
+      // show server debug if available
+      const msg = j ? (j.message || JSON.stringify(j)) : text;
+      document.getElementById('regStatus').innerText = 'Registration failed: ' + (msg || 'unknown error');
+      console.error('register_api response:', j || text);
+    }
+  } catch (err) {
+    console.error('register_api error', err);
+    document.getElementById('regStatus').innerText = 'Registration error: ' + (err && err.message ? err.message : err);
+  }
+});
+
+document.getElementById('aadhaarPhotoInput').addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) { aadhaarPhotoDataUrl = null; return; }
+  const reader = new FileReader();
+  reader.onload = () => { aadhaarPhotoDataUrl = reader.result; }
+  reader.readAsDataURL(f);
+});
+
+</script>
+</body>
+</html>

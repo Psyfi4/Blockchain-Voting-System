@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Live Recognition</title>
+  <style>
+    body{font-family:system-ui, -apple-system,Segoe UI,Roboto,Arial;margin:8px;}
+    .wrap{display:flex;gap:12px;}
+    .panel{background:#fff;padding:12px;border-radius:8px;border:1px solid #eee;}
+    video, canvas{width:640px;height:480px;border-radius:6px;background:#000;}
+    .info{width:360px;}
+    .match-card{border:1px solid #ddd;padding:8px;border-radius:6px;margin-bottom:8px;}
+    .muted{color:#666;font-size:13px;}
+  </style>
+</head>
+<body>
+  <h2>Live Face Recognition</h2>
+  <div class="wrap">
+    <div class="panel">
+      <video id="video" autoplay playsinline></video>
+      <canvas id="overlay"></canvas>
+      <div style="margin-top:8px;">
+        <button id="startBtn">Start Camera</button>
+        <button id="stopBtn">Stop</button>
+      </div>
+      <div class="muted">Face dims: <span id="dims">-</span></div>
+    </div>
+
+    <div class="panel info">
+      <h3>Match / Details</h3>
+      <div id="matches">No match yet.</div>
+    </div>
+  </div>
+
+<script>
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
+let stream = null;
+let running = false;
+let tickHandle = null;
+
+// ensure overlay matches video after metadata loads
+video.addEventListener('loadedmetadata', () => {
+  overlay.width = video.videoWidth || 640;
+  overlay.height = video.videoHeight || 480;
+});
+
+// start camera
+async function startCamera(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    // ensure sizes are correct after play
+    overlay.width = video.videoWidth || 640;
+    overlay.height = video.videoHeight || 480;
+    running = true;
+    runLoop();
+  }catch(e){
+    console.error("Camera start error:", e);
+    alert("Camera error: " + (e && e.message ? e.message : e) + ". If running remotely, run locally.");
+  }
+}
+
+function stopCamera(){
+  running = false;
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream = null;
+  }
+  if(tickHandle) { clearTimeout(tickHandle); tickHandle = null; }
+  // clear overlay
+  ctx.clearRect(0,0,overlay.width, overlay.height);
+  document.getElementById("matches").innerText = "No match yet.";
+  document.getElementById("dims").innerText = "-";
+}
+
+function getFrameDataUrl(){
+  const c = document.createElement("canvas");
+  c.width = video.videoWidth || 640;
+  c.height = video.videoHeight || 480;
+  const cx = c.getContext("2d");
+  cx.drawImage(video,0,0,c.width,c.height);
+  return c.toDataURL("image/jpeg", 0.6);
+}
+
+async function runLoop(){
+  if(!running) return;
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+
+  // optional static guide box
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(20,20,overlay.width-40, overlay.height-40);
+
+  const snap = getFrameDataUrl();
+  try{
+    const resp = await fetch("/recognize_frame", {
+      method:"POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: snap })
+    });
+
+    if(!resp.ok){
+      console.warn("recognize_frame status", resp.status);
+    } else {
+      const json = await resp.json();
+      if(json.results && json.results.length){
+        const r = json.results[0]; // first face result
+        // prefer normalized coords; if absent, fallback to px
+        let x1,y1,x2,y2;
+        if(r.location_norm && r.location_norm.length === 4){
+          const [nx1, ny1, nx2, ny2] = r.location_norm;
+          x1 = Math.round(nx1 * overlay.width);
+          y1 = Math.round(ny1 * overlay.height);
+          x2 = Math.round(nx2 * overlay.width);
+          y2 = Math.round(ny2 * overlay.height);
+        } else if(r.location_px && r.location_px.length === 4) {
+          // server returned px in case sizes matched
+          const [left, top, right, bottom] = r.location_px;
+          x1 = left; y1 = top; x2 = right; y2 = bottom;
+        } else {
+          x1 = y1 = x2 = y2 = 0;
+        }
+
+        // draw bounding box
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = r.matched ? "lime" : (r.unconfirmed ? "orange" : "red");
+        ctx.strokeRect(x1, y1, Math.max(2,x2-x1), Math.max(2,y2-y1));
+        document.getElementById("dims").innerText = `${Math.max(0,x2-x1)} x ${Math.max(0,y2-y1)}`;
+
+        // update match panel
+        const matches = document.getElementById("matches");
+        matches.innerHTML = "";
+        const card = document.createElement("div");
+        card.className = "match-card";
+        const name = r.name || "(unknown)";
+        const a = r.aadhaar_number || "(none)";
+        card.innerHTML = `<strong>${name}</strong><div>Aadhaar: ${a}</div><div>Confidence: ${(r.confidence||0).toFixed(3)}</div>`;
+        if(r.details){
+          const d = r.details;
+          card.innerHTML += `<div style="margin-top:6px;"><b>Details</b>
+            <div>Name: ${d.name || "-"}</div>
+            <div>DOB: ${d.date_of_birth || "-"}</div>
+            <div>Address: ${d.address || "-"}</div>
+            <div>Registered: ${d.registration_date || "-"}</div>
+          </div>`;
+        }
+        if(r.aadhaar_photo){
+          const img = document.createElement("img");
+          img.src = r.aadhaar_photo;
+          img.style.maxWidth = "100%";
+          img.style.marginTop = "6px";
+          card.appendChild(img);
+        }
+        matches.appendChild(card);
+      } else {
+        // no faces
+        document.getElementById("dims").innerText = "-";
+        document.getElementById("matches").innerText = "No match yet.";
+      }
+    }
+  } catch(err){
+    console.error("recognize_frame error", err);
+  }
+
+  tickHandle = setTimeout(runLoop, 600);
+}
+
+document.getElementById("startBtn").addEventListener("click", startCamera);
+document.getElementById("stopBtn").addEventListener("click", stopCamera);
+</script>
+

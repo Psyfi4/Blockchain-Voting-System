@@ -1,0 +1,112 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Camera Debug — Aadhaar App</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 18px auto; }
+    video { width: 640px; height: 480px; border: 2px solid #333; display:block; margin-bottom:8px; }
+    select, button { padding: 8px 10px; margin-right:8px; }
+    pre { background:#f6f6f6; padding:12px; border-radius:6px; white-space:pre-wrap; max-height:240px; overflow:auto; }
+    .note { color:#666; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h2>Camera Debug</h2>
+  <video id="video" autoplay playsinline></video>
+  <div>
+    <label>Camera device: <select id="deviceSelect"></select></label>
+    <button id="startBtn">Start Camera</button>
+    <button id="stopBtn">Stop Camera</button>
+    <button id="testSnap">Take Snapshot</button>
+  </div>
+  <div class="note">Open DevTools Console and Network tab. Copy console messages if problems persist.</div>
+  <h3>Console output (also printed to browser console)</h3>
+  <pre id="out">Ready</pre>
+
+<script>
+const out = (s) => {
+  console.log(s);
+  const p = document.getElementById('out');
+  p.textContent = (p.textContent ? p.textContent + "\n" : "") + String(s);
+};
+
+async function listDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const sel = document.getElementById('deviceSelect');
+    sel.innerHTML = '';
+    devices.forEach(d => {
+      if (d.kind === 'videoinput') {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.text = d.label || `Camera ${sel.length+1}`;
+        sel.appendChild(opt);
+      }
+    });
+    out('Device list updated; video inputs: ' + sel.options.length);
+    console.table(devices);
+  } catch (e) {
+    out('enumerateDevices error: ' + e);
+  }
+}
+
+let stream = null;
+
+async function startCamera() {
+  try {
+    const sel = document.getElementById('deviceSelect');
+    const deviceId = sel.value || undefined;
+    // Try simple constraints first — highest compatibility
+    const constraints = deviceId ? { video: { deviceId: { exact: deviceId } }, audio: false } :
+                                   { video: { facingMode: 'user' }, audio: false };
+    out('Requesting camera with constraints: ' + JSON.stringify(constraints));
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    document.getElementById('video').srcObject = stream;
+    out('Camera started: ' + stream.id);
+  } catch (err) {
+    out('getUserMedia error: ' + (err.name || err) + ' — ' + (err.message || err));
+    // friendly suggestions
+    if (err.name === 'NotAllowedError') out('Permission denied — allow camera in site settings.');
+    if (err.name === 'NotFoundError') out('No camera found on this device.');
+    if (err.name === 'NotReadableError') out('Camera is already in use by another app.');
+    if (err.name === 'OverconstrainedError') out('Constraints cannot be satisfied; try selecting a different device or using simpler constraints.');
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    out('Camera stopped');
+    stream = null;
+    document.getElementById('video').srcObject = null;
+  } else out('No active stream to stop');
+}
+
+function takeSnapshot() {
+  const vid = document.getElementById('video');
+  if (!vid || !vid.videoWidth) {
+    out('No video frames available to snapshot');
+    return;
+  }
+  const c = document.createElement('canvas');
+  c.width = vid.videoWidth;
+  c.height = vid.videoHeight;
+  c.getContext('2d').drawImage(vid, 0, 0);
+  const d = c.toDataURL('image/jpeg', 0.9);
+  out('Snapshot taken (dataURL length ' + d.length + ') — you can post this to /recognize');
+  // show small image in a new window
+  const w = window.open('', '_blank');
+  w.document.write('<img src="'+d+'" style="max-width:100%"/>');
+}
+
+document.getElementById('startBtn').addEventListener('click', startCamera);
+document.getElementById('stopBtn').addEventListener('click', stopCamera);
+document.getElementById('testSnap').addEventListener('click', takeSnapshot);
+
+navigator.permissions && navigator.permissions.query({name:'camera'}).then(s => out('Camera permission state: ' + s.state)).catch(()=>{});
+listDevices();
+</script>
+</body>
+</html>
