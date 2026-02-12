@@ -31,6 +31,8 @@ class AadhaarFaceSystem:
         self.known_details: List[Dict[str, str]] = []
 
         self._load_cache()
+        print("Loaded embeddings:", len(self.known_embeddings))
+
 
     # ---------------- DATABASE ---------------- #
 
