@@ -6,5 +6,9 @@ dlib<20.1
 flask==3.1.2
 insightface
 onnxruntime
-pillow
+streamlit
+streamlit-webrtc
+numpy==1.26.4
 easyocr
+pillow
+
