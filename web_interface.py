@@ -275,7 +275,7 @@ def register_api():
     try:
         # Try to detect face again on the saved tmp (BGR)
         img_bgr = cv2.imread(tmp_path)
-        faces = system.app.get(img_bgr)
+        faces = system.face_app.get(img_bgr)
         reg_face_path = None
         if faces and len(faces) >= 1:
             f = faces[0]
@@ -345,7 +345,7 @@ def recognize_frame():
     # Call recognizer (system.recognize_face expects numpy arrays RGB or BGR depending on your implementation).
     # We try RGB first (most of our helpers return RGB).
     try:
-        results = system.recognize_face(rgb)
+        results = system.recognize_face_from_pil(Image.fromarray(rgb))
     except Exception:
         try:
             results = system.recognize_face(rgb[:, :, ::-1])
@@ -410,7 +410,7 @@ def recognize_stream():
         results = system.recognize_face_from_pil(Image.fromarray(rgb))
     except Exception:
         try:
-            results = system.recognize_face(bgr)
+            results = system.recognize_face_from_pil(Image.fromarray(rgb))
         except Exception as e:
             print("[recognize_stream] recognition failed:", e)
             results = []
