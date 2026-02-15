@@ -22,7 +22,7 @@
 </head>
 <body onload="startTimer()">
 
-    <div id="timerContainer" class="fixed bottom-10 right-10 px-8 py-4 rounded-3xl flex items-center gap-4 transition-all">
+    <div id="timerContainer" class="fixed bottom-10 right-10 px-6 py-3 rounded-xl flex items-center gap-3">
         <i class="fas fa-hourglass-start text-blue-600 text-2xl" id="timerIcon"></i>
         <span id="displayTime" class="text-4xl font-black font-mono tracking-tighter">00:00</span>
     </div>
@@ -141,48 +141,47 @@ Consensus validation → Immutable storage → Offline sync capability.</p>
     </footer>
 
     <script>
-(function () {
-    const display = document.getElementById("displayTime");
-    const container = document.getElementById("timerContainer");
-    const icon = document.getElementById("timerIcon");
+const display = document.getElementById("displayTime");
+const container = document.getElementById("timerContainer");
+const icon = document.getElementById("timerIcon");
 
-    // Stop if elements not found (prevents crash)
-    if (!display || !container || !icon) {
-        console.log("Timer elements not found");
-        return;
+let startTime = null;
+let stopped = false;
+
+function updateTimer(timestamp) {
+    if (!startTime) startTime = timestamp;
+
+    const elapsed = Math.floor((timestamp - startTime) / 1000);
+
+    const minutes = Math.floor(elapsed / 60);
+    const seconds = elapsed % 60;
+
+    display.textContent =
+        String(minutes).padStart(2, '0') + ":" +
+        String(seconds).padStart(2, '0');
+
+    if (elapsed >= 480 && elapsed < 600) {
+        container.classList.add("timer-warning");
+        icon.classList.replace("fa-hourglass-start", "fa-hourglass-half");
     }
 
-    let seconds = 0;
+    if (elapsed >= 600) {
+        container.classList.remove("timer-warning");
+        container.classList.add("timer-stop");
+        icon.classList.replace("fa-hourglass-half", "fa-hourglass-end");
+        stopped = true;
+    }
 
-    const timer = setInterval(() => {
-        seconds++;
+    if (!stopped) {
+        requestAnimationFrame(updateTimer);
+    }
+}
 
-        const m = Math.floor(seconds / 60);
-        const s = seconds % 60;
-
-        display.textContent =
-            String(m).padStart(2, "0") + ":" +
-            String(s).padStart(2, "0");
-
-        // 8 min warning
-        if (seconds === 480) {
-            container.classList.add("timer-warning");
-            icon.classList.replace("fa-hourglass-start", "fa-hourglass-half");
-        }
-
-        // Stop at 10 min
-        if (seconds === 600) {
-            clearInterval(timer);
-            container.classList.remove("timer-warning");
-            container.classList.add("timer-stop");
-            icon.classList.replace("fa-hourglass-half", "fa-hourglass-end");
-        }
-
-    }, 1000);
-})();
+requestAnimationFrame(updateTimer);
 </script>
 </body>
 </html>
+
 
 
 
