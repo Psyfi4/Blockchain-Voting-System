@@ -131,20 +131,15 @@
     </footer>
 
 <script>
-(function () {
+window.addEventListener("DOMContentLoaded", function () {
+
     const display = document.getElementById("displayTime");
     const container = document.getElementById("timerContainer");
     const icon = document.getElementById("timerIcon");
 
-    // Stop if elements not found (prevents crash)
-    if (!display || !container || !icon) {
-        console.log("Timer elements not found");
-        return;
-    }
-
     let seconds = 0;
 
-    const timer = setInterval(() => {
+    const timer = setInterval(function () {
         seconds++;
 
         const m = Math.floor(seconds / 60);
@@ -154,13 +149,13 @@
             String(m).padStart(2, "0") + ":" +
             String(s).padStart(2, "0");
 
-        // 8 min warning
+        // 8 minute warning
         if (seconds === 480) {
             container.classList.add("timer-warning");
             icon.classList.replace("fa-hourglass-start", "fa-hourglass-half");
         }
 
-        // Stop at 10 min
+        // Stop at 10 minutes
         if (seconds === 600) {
             clearInterval(timer);
             container.classList.remove("timer-warning");
@@ -169,10 +164,12 @@
         }
 
     }, 1000);
-})();
+
+});
 </script>
 </body>
 </html>
+
 
 
 
