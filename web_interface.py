@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# web_interface.py
 """
 Web interface for AadhaarFaceSystem (Option A).
 - Standardizes DB columns to: registered_face_path, aadhaar_photo_path
@@ -43,9 +41,6 @@ system = AadhaarFaceSystem()
 # Regex to match data URLs
 _DATAURL_RE = re.compile(r'data:(image/[^;]+);base64,(.*)$', re.I)
 
-# -----------------------
-# Utilities
-# -----------------------
 def json_api(fn):
     """Decorator to ensure JSON error responses and traceback logging."""
     @wraps(fn)
@@ -78,7 +73,6 @@ def decode_base64_image(data_url: str) -> Optional[np.ndarray]:
     try:
         b = base64.b64decode(b64)
         pil = Image.open(io.BytesIO(b))
-        # fix orientation if EXIF exists
         try:
             for orientation in ExifTags.TAGS.keys():
                 if ExifTags.TAGS[orientation] == 'Orientation':
@@ -95,7 +89,7 @@ def decode_base64_image(data_url: str) -> Optional[np.ndarray]:
         except Exception:
             pass
         pil = pil.convert("RGB")
-        arr = np.asarray(pil)  # RGB
+        arr = np.asarray(pil) 
         return arr
     except Exception as e:
         print("[decode_base64_image] failed:", e)
@@ -149,12 +143,8 @@ def ensure_db_has_columns():
 # Run migration at startup
 ensure_db_has_columns()
 
-# -----------------------
-# Routes: pages
-# -----------------------
 @app.route("/")
 def home():
-    # simple landing, ensure you have templates/home.html
     return render_template("home.html")
 
 @app.route("/register")
@@ -165,9 +155,6 @@ def register_page():
 def recognize_page():
     return render_template("recognize_live.html")
 
-# -----------------------
-# API endpoints
-# -----------------------
 @app.route("/detect_preview", methods=["POST"])
 @json_api
 def detect_preview():
@@ -195,7 +182,7 @@ def detect_preview():
             out.append({"bbox": [x1, y1, x2, y2], "w": int(x2 - x1), "h": int(y2 - y1)})
         except Exception:
             continue
-    # optionally save a debug image
+
     try:
         save_debug_image_bgr(bgr, "detect_preview_in")
     except Exception:
@@ -248,7 +235,6 @@ def register_api():
     except Exception as e:
         return jsonify({"success": False, "message": "Failed to save temp image: " + str(e)}), 500
 
-    # call register_person to store embedding/etc.
     try:
 
         pil_img = Image.open(tmp_path)
@@ -282,7 +268,6 @@ def register_api():
             try:
                 x1, y1, x2, y2 = map(int, f.bbox)
                 h, w = img_bgr.shape[:2]
-                # clamp
                 x1 = max(0, min(w - 1, x1))
                 y1 = max(0, min(h - 1, y1))
                 x2 = max(0, min(w, x2))
@@ -342,8 +327,6 @@ def recognize_frame():
     if rgb is None:
         return jsonify({"error": "could not decode"}), 400
 
-    # Call recognizer (system.recognize_face expects numpy arrays RGB or BGR depending on your implementation).
-    # We try RGB first (most of our helpers return RGB).
     try:
         results = system.recognize_face_from_pil(Image.fromarray(rgb))
     except Exception:
@@ -456,9 +439,6 @@ def diag():
         traceback.print_exc()
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
-# -----------------------
-# Run server
-# -----------------------
 if __name__ == "__main__":
     host = os.environ.get("FLASK_RUN_HOST", "0.0.0.0")
     port = int(os.environ.get("FLASK_RUN_PORT", 5000))
